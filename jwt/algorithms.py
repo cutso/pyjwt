@@ -1,9 +1,13 @@
 import hashlib
 import hmac
+import json
 
 from .compat import constant_time_compare, string_types, text_type
 from .exceptions import InvalidKeyError
-from .utils import der_to_raw_signature, raw_to_der_signature
+from .utils import (
+    base64url_decode, base64url_encode, der_to_raw_signature,
+    from_base64url_uint, raw_to_der_signature, to_base64url_uint
+)
 
 try:
     from cryptography.hazmat.primitives import hashes
@@ -11,7 +15,8 @@ try:
         load_pem_private_key, load_pem_public_key, load_ssh_public_key
     )
     from cryptography.hazmat.primitives.asymmetric.rsa import (
-        RSAPrivateKey, RSAPublicKey
+        RSAPrivateKey, RSAPublicKey, RSAPrivateNumbers, RSAPublicNumbers,
+        rsa_recover_prime_factors, rsa_crt_dmp1, rsa_crt_dmq1, rsa_crt_iqmp
     )
     from cryptography.hazmat.primitives.asymmetric.ec import (
         EllipticCurvePrivateKey, EllipticCurvePublicKey
@@ -77,6 +82,20 @@ class Algorithm(object):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def to_jwk(key_obj):
+        """
+        Serializes a given RSA key into a JWK
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def from_jwk(jwk):
+        """
+        Deserializes a given RSA key from JWK back into a PublicKey or PrivateKey object
+        """
+        raise NotImplementedError
+
 
 class NoneAlgorithm(Algorithm):
     """
@@ -131,6 +150,22 @@ class HMACAlgorithm(Algorithm):
 
         return key
 
+    @staticmethod
+    def to_jwk(key_obj):
+        return json.dumps({
+            'k': base64url_encode(key_obj),
+            'typ': 'oct'
+        })
+
+    @staticmethod
+    def from_jwk(jwk):
+        obj = json.loads(jwk)
+
+        if obj.get('kty') != 'oct':
+            raise InvalidKeyError('Not an HMAC key')
+
+        return base64url_decode(obj['k'])
+
     def sign(self, msg, key):
         return hmac.new(key, msg, self.hash_alg).digest()
 
@@ -171,6 +206,101 @@ if has_crypto:
                 raise TypeError('Expecting a PEM-formatted key.')
 
             return key
+
+        @staticmethod
+        def to_jwk(key_obj):
+            obj = None
+
+            if getattr(key_obj, 'private_numbers', None):
+                # Private key
+                numbers = key_obj.private_numbers()
+
+                obj = {
+                    'kty': 'RSA',
+                    'key_ops': ['sign'],
+                    'd': to_base64url_uint(numbers.d),
+                    'p': to_base64url_uint(numbers.p),
+                    'q': to_base64url_uint(numbers.q),
+                    'dp': to_base64url_uint(numbers.dmp1),
+                    'dq': to_base64url_uint(numbers.dmq1),
+                    'qi': to_base64url_uint(numbers.iqmp)
+                }
+
+            elif getattr(key_obj, 'verifier', None):
+                # Public key
+                numbers = key_obj.public_numbers()
+
+                obj = {
+                    'kty': 'RSA',
+                    'use': 'sig',
+                    'key_ops': ['verify'],
+                    'n': to_base64url_uint(numbers.n),
+                    'e': to_base64url_uint(numbers.e)
+                }
+            else:
+                raise InvalidKeyError('Not a public or private key')
+
+            return json.dumps(obj)
+
+        @staticmethod
+        def from_jwk(jwk):
+            obj = json.loads(jwk)
+
+            if obj.get('kty') != 'RSA':
+                raise InvalidKeyError('Not an RSA key')
+
+            if 'd' in obj and 'e' in obj and 'n' in obj:
+                # Private key
+                if 'oth' in obj:
+                    raise InvalidKeyError('Unsupported RSA private key: > 2 primes not supported')
+
+                other_props = ['p', 'q', 'dp', 'dq', 'qi']
+                props_found = [True for prop in other_props if prop in obj]
+                any_props_found = any(props_found)
+
+                if any_props_found and not all(props_found):
+                    raise InvalidKeyError('RSA key must include all parameters if any are present besides d')
+
+                public_numbers = RSAPublicNumbers(
+                    from_base64url_uint(obj['e']), from_base64url_uint(obj['n'])
+                )
+
+                if any_props_found:
+                    numbers = RSAPrivateNumbers(
+                        d=from_base64url_uint(obj['d']),
+                        p=from_base64url_uint(obj['p']),
+                        q=from_base64url_uint(obj['q']),
+                        dmp1=from_base64url_uint(obj['dp']),
+                        dmq1=from_base64url_uint(obj['dq']),
+                        iqmp=from_base64url_uint(obj['qi']),
+                        public_numbers=public_numbers
+                    )
+                else:
+                    p, q = rsa_recover_prime_factors(
+                        public_numbers.n, public_numbers.d, public_numbers.e
+                    )
+                    d = from_base64url_uint(obj['d'])
+
+                    numbers = RSAPrivateNumbers(
+                        d=d,
+                        p=p,
+                        q=q,
+                        dmp1=rsa_crt_dmp1(d, p),
+                        dmq1=rsa_crt_dmq1(d, q),
+                        iqmp=rsa_crt_iqmp(p, q),
+                        public_numbers=public_numbers
+                    )
+
+                return numbers.private_key(default_backend())
+            elif 'n' in obj and 'e' in obj:
+                # Public key
+                numbers = RSAPublicNumbers(
+                    from_base64url_uint(obj['e']), from_base64url_uint(obj['n'])
+                )
+
+                return numbers.public_key(default_backend())
+            else:
+                raise InvalidKeyError('Not a public or private key')
 
         def sign(self, msg, key):
             signer = key.signer(

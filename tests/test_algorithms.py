@@ -36,6 +36,18 @@ class TestAlgorithms:
         with pytest.raises(NotImplementedError):
             algo.verify('message', 'key', 'signature')
 
+    def test_algorithm_should_throw_exception_if_to_jwk_not_impl(self):
+        algo = Algorithm()
+
+        with pytest.raises(NotImplementedError):
+            algo.from_jwk('value')
+
+    def test_algorithm_should_throw_exception_if_from_jwk_not_impl(self):
+        algo = Algorithm()
+
+        with pytest.raises(NotImplementedError):
+            algo.to_jwk('value')
+
     def test_none_algorithm_should_throw_exception_if_key_is_not_none(self):
         algo = NoneAlgorithm()
 
@@ -84,6 +96,15 @@ class TestAlgorithms:
             with open(key_path('testkey2_rsa.pub.pem'), 'r') as keyfile:
                 algo.prepare_key(keyfile.read())
 
+    def test_hmac_jwk_public_and_private_keys_should_parse_and_verify(self):
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        with open(key_path('jwk_hmac.json'), 'r') as keyfile:
+            key = algo.from_jwk(keyfile.read())
+
+        signature = algo.sign(b'Hello World!', key)
+        assert algo.verify(b'Hello World!', key, signature)
+
     @pytest.mark.skipif(not has_crypto, reason='Not supported without cryptography library')
     def test_rsa_should_parse_pem_public_key(self):
         algo = RSAAlgorithm(RSAAlgorithm.SHA256)
@@ -126,6 +147,19 @@ class TestAlgorithms:
 
         result = algo.verify(message, pub_key, sig)
         assert not result
+
+    @pytest.mark.skipif(not has_crypto, reason='Not supported without cryptography library')
+    def test_rsa_jwk_public_and_private_keys_should_parse_and_verify(self):
+        algo = RSAAlgorithm(RSAAlgorithm.SHA256)
+
+        with open(key_path('jwk_rsa_pub.json'), 'r') as keyfile:
+            pub_key = algo.from_jwk(keyfile.read())
+
+        with open(key_path('jwk_rsa_key.json'), 'r') as keyfile:
+            priv_key = algo.from_jwk(keyfile.read())
+
+        signature = algo.sign(ensure_bytes('Hello World!'), priv_key)
+        assert algo.verify(ensure_bytes('Hello World!'), pub_key, signature)
 
     @pytest.mark.skipif(not has_crypto, reason='Not supported without cryptography library')
     def test_ec_should_reject_non_string_key(self):
